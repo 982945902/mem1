@@ -12,6 +12,8 @@ use super::db::Db;
 
 /// RRF constant (reciprocal rank fusion). score = 1/(k + rank).
 const RRF_K: u32 = 60;
+/// Extra weight for keyword path in RRF (improves when answer is keyword-matched).
+const RRF_KEYWORD_WEIGHT: f32 = 1.2;
 
 /// Build a shorter keyword query from the longest 2 terms (len >= 2), so FTS AND-semantics
 /// can match when the full query has stopwords like "what does" that are not in the document.
@@ -114,7 +116,7 @@ fn rrf_merge(
     let mut memories: HashMap<String, Memory> = HashMap::new();
     for (rank_one_based, (id, mem)) in kw_list.into_iter().enumerate() {
         let r = (rank_one_based + 1) as f32;
-        *scores.entry(id.clone()).or_default() += 1.0 / (k + r);
+        *scores.entry(id.clone()).or_default() += RRF_KEYWORD_WEIGHT / (k + r);
         memories.insert(id, mem);
     }
     for (rank_one_based, (id, mem)) in vec_list.into_iter().enumerate() {
