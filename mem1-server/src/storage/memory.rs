@@ -7,7 +7,7 @@ use crate::memory::model::Memory;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use surrealdb::RecordId;
 
 use super::db::Db;
@@ -280,6 +280,44 @@ impl SurrealMemoryStore {
             .map(|(_, id, mem)| (id, mem))
             .collect())
     }
+
+    /// Expands search results with related memories from metadata["related_ids"] (Zep-style graph context).
+    async fn expand_with_related(
+        &self,
+        user_id: &str,
+        mut items: Vec<(Memory, Option<f32>)>,
+        limit: u32,
+    ) -> Result<Vec<(Memory, Option<f32>)>, Error> {
+        let cap = limit as usize;
+        if items.len() >= cap {
+            return Ok(items);
+        }
+        let mut seen: HashSet<String> = items.iter().map(|(m, _)| m.id.clone()).collect();
+        let mut related_ids: Vec<String> = Vec::new();
+        for (m, _) in &items {
+            if let Some(arr) = m.metadata.get("related_ids").and_then(|v| v.as_array()) {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        let s = s.to_string();
+                        if !seen.contains(&s) {
+                            seen.insert(s.clone());
+                            related_ids.push(s);
+                        }
+                    }
+                }
+            }
+        }
+        const MAX_RELATED: usize = 10;
+        for id in related_ids.into_iter().take(MAX_RELATED) {
+            if items.len() >= cap {
+                break;
+            }
+            if let Ok(Some(mem)) = self.get(id.as_str(), user_id).await {
+                items.push((mem, None));
+            }
+        }
+        Ok(items)
+    }
 }
 
 #[async_trait]
@@ -375,7 +413,7 @@ impl MemoryStore for SurrealMemoryStore {
                 .filter(|(m, _)| is_valid_at(m, &now))
                 .take(limit as usize)
                 .collect();
-            return Ok(filtered);
+            return self.expand_with_related(&user_id, filtered, limit).await;
         }
 
         // No embedding: keyword-only (FULLTEXT + search::score).
@@ -394,11 +432,12 @@ impl MemoryStore for SurrealMemoryStore {
             }
         }
         let now = Utc::now();
-        Ok(kw_list
+        let list: Vec<_> = kw_list
             .into_iter()
             .map(|(_, mem)| (mem, None))
             .filter(|(m, _)| is_valid_at(m, &now))
             .take(limit as usize)
-            .collect())
+            .collect();
+        self.expand_with_related(user_id, list, limit).await
     }
 }

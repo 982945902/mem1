@@ -1,5 +1,6 @@
 //! Memory entity per data-model.md (T008).
-//! Optional metadata keys valid_at / invalid_at (RFC3339) for temporal validity (Zep/Graphiti-style).
+//! Optional metadata: valid_at/invalid_at (RFC3339) for temporal validity (Zep/Graphiti);
+//! related_ids (array of memory ids) for graph-context expansion on search (Zep-style).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
