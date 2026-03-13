@@ -1,14 +1,41 @@
 //! Memory storage trait and SurrealDB implementation (T010).
 //! Search supports hybrid retrieval: FULLTEXT (keyword) + vector in parallel, merged with RRF.
+//! Optional temporal validity (metadata valid_at/invalid_at) inspired by Zep/Graphiti.
 
 use crate::error::Error;
 use crate::memory::model::Memory;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use surrealdb::RecordId;
 
 use super::db::Db;
+
+/// Returns true if the memory is considered valid at `now`. If metadata contains
+/// "valid_at" / "invalid_at" (RFC3339), only memories within [valid_at, invalid_at) are valid.
+/// Inspired by Zep/Graphiti temporal fact validity.
+fn is_valid_at(mem: &Memory, now: &DateTime<Utc>) -> bool {
+    let valid_from = mem.metadata.get("valid_at").and_then(|v| v.as_str());
+    let valid_until = mem.metadata.get("invalid_at").and_then(|v| v.as_str());
+    if let Some(s) = valid_from {
+        if let Ok(t) = DateTime::parse_from_rfc3339(s) {
+            let t = t.with_timezone(&Utc);
+            if now < &t {
+                return false;
+            }
+        }
+    }
+    if let Some(s) = valid_until {
+        if let Ok(t) = DateTime::parse_from_rfc3339(s) {
+            let t = t.with_timezone(&Utc);
+            if now >= &t {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 /// RRF constant (reciprocal rank fusion). score = 1/(k + rank).
 const RRF_K: u32 = 60;
@@ -341,7 +368,14 @@ impl MemoryStore for SurrealMemoryStore {
                             .await?;
                 }
             }
-            return Ok(rrf_merge(kw_list, vec_list, limit));
+            let merged = rrf_merge(kw_list, vec_list, limit);
+            let now = Utc::now();
+            let filtered: Vec<_> = merged
+                .into_iter()
+                .filter(|(m, _)| is_valid_at(m, &now))
+                .take(limit as usize)
+                .collect();
+            return Ok(filtered);
         }
 
         // No embedding: keyword-only (FULLTEXT + search::score).
@@ -359,9 +393,11 @@ impl MemoryStore for SurrealMemoryStore {
                         .await?;
             }
         }
+        let now = Utc::now();
         Ok(kw_list
             .into_iter()
             .map(|(_, mem)| (mem, None))
+            .filter(|(m, _)| is_valid_at(m, &now))
             .take(limit as usize)
             .collect())
     }
