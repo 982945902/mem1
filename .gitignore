@@ -39,5 +39,8 @@ Thumbs.db
 .env
 .env.*
 
-# ---- Optional ----
+# ---- Local / do not commit ----
+specs/
+.specs/
+toolchain/
 toolchain_data/

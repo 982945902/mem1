@@ -1,3 +1,0 @@
-# Minimal deps for file-based store and CLI.
-# Optional: PyYAML for config file support (config can also use .env)
-pyyaml>=6.0
