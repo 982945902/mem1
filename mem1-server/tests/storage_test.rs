@@ -155,3 +155,43 @@ async fn users_and_reset_cover_all_memories() {
 
     let _ = std::fs::remove_dir_all(db_path);
 }
+
+#[tokio::test]
+async fn search_expands_memories_connected_by_graph_entities() {
+    let (db_path, store) = test_store("graph-search").await;
+    let passport = store
+        .add(&Memory::new(
+            "Alice misplaced her passport at the airport".to_string(),
+            "u1".to_string(),
+            HashMap::new(),
+        ))
+        .await
+        .unwrap();
+    let hotel = store
+        .add(&Memory::new(
+            "Alice booked a hotel near the museum".to_string(),
+            "u1".to_string(),
+            HashMap::new(),
+        ))
+        .await
+        .unwrap();
+    store
+        .add(&Memory::new(
+            "Bob prefers train travel".to_string(),
+            "u1".to_string(),
+            HashMap::new(),
+        ))
+        .await
+        .unwrap();
+
+    let rows = store
+        .search("u1", "passport", None, 5, &MemoryFilters::default())
+        .await
+        .unwrap();
+    let ids: Vec<_> = rows.into_iter().map(|(m, _)| m.id).collect();
+
+    assert!(ids.contains(&passport.id));
+    assert!(ids.contains(&hotel.id));
+
+    let _ = std::fs::remove_dir_all(db_path);
+}

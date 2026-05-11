@@ -38,6 +38,12 @@ pub async fn ensure_schema(db: &Db) -> Result<(), Error> {
     db.query("DEFINE TABLE IF NOT EXISTS memory_history SCHEMALESS;")
         .await
         .map_err(|e| Error::Storage(anyhow::anyhow!("define history table: {e}")))?;
+    db.query("DEFINE TABLE IF NOT EXISTS graph_entities SCHEMALESS;")
+        .await
+        .map_err(|e| Error::Storage(anyhow::anyhow!("define graph entities table: {e}")))?;
+    db.query("DEFINE TABLE IF NOT EXISTS memory_entities SCHEMALESS;")
+        .await
+        .map_err(|e| Error::Storage(anyhow::anyhow!("define memory entities table: {e}")))?;
     // Full-text search on content for hybrid (keyword + vector) retrieval.
     db.query(
         "DEFINE INDEX IF NOT EXISTS memories_content_ft ON TABLE memories COLUMNS content SEARCH ANALYZER simple;",

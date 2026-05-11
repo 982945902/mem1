@@ -36,6 +36,14 @@ Answer in 5-6 words or less:
 """
 
 
+def memory_context_from_response(resp: dict) -> str:
+    formatted_context = (resp.get("formatted_context") or "").strip()
+    if formatted_context:
+        return formatted_context
+    items = resp.get("results", [])
+    return "\n".join(m.get("content", "") for m in items)
+
+
 def load_data(file_path: str) -> list:
     with open(file_path, "r") as f:
         return json.load(f)
@@ -58,12 +66,13 @@ class Mem1Search:
         self._llm_model = os.getenv("MODEL") or os.getenv("EVAL_LLM_MODEL", "gpt-4o-mini")
         self._llm_ok = bool(self._llm_api_key and self._llm_base_url)
 
-    def search_memory(self, user_id: str, query: str) -> tuple[list[dict], float]:
+    def search_memory(self, user_id: str, query: str) -> tuple[list[dict], str, float]:
         start = time.time()
         resp = self.memory.search(query, user_id=user_id, limit=self.top_k)
         elapsed = time.time() - start
         items = resp.get("results", [])
-        return items, elapsed
+        context = memory_context_from_response(resp)
+        return items, context, elapsed
 
     def answer_question(
         self,
@@ -71,8 +80,8 @@ class Mem1Search:
         speaker_b_user_id: str,
         question: str,
     ) -> tuple[str, list, list, float, float, float]:
-        mem_a, time_a = self.search_memory(speaker_a_user_id, question)
-        mem_b, time_b = self.search_memory(speaker_b_user_id, question)
+        mem_a, context_a, time_a = self.search_memory(speaker_a_user_id, question)
+        mem_b, context_b, time_b = self.search_memory(speaker_b_user_id, question)
         if not mem_a and not mem_b:
             import warnings
             warnings.warn(
@@ -80,8 +89,6 @@ class Mem1Search:
                 "Check that add ran against the same mem1-server and that embedding or keyword index is enabled."
             )
 
-        str_a = "\n".join(m.get("content", "") for m in mem_a)
-        str_b = "\n".join(m.get("content", "") for m in mem_b)
         speaker_1_id = speaker_a_user_id.split("_")[0]
         speaker_2_id = speaker_b_user_id.split("_")[0]
 
@@ -89,8 +96,8 @@ class Mem1Search:
         prompt = template.render(
             speaker_1_user_id=speaker_1_id,
             speaker_2_user_id=speaker_2_id,
-            speaker_1_memories=str_a or "(none)",
-            speaker_2_memories=str_b or "(none)",
+            speaker_1_memories=context_a or "(none)",
+            speaker_2_memories=context_b or "(none)",
             question=question,
         )
 

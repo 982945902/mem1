@@ -96,6 +96,10 @@ impl MemoryFilters {
 const RRF_K: u32 = 60;
 /// Extra weight for keyword path in RRF. 1.0 = equal weight with vector (align with mem0 not emphasizing keyword).
 const RRF_KEYWORD_WEIGHT: f32 = 1.0;
+const RRF_VECTOR_WEIGHT: f32 = 1.0;
+const RRF_GRAPH_WEIGHT: f32 = 1.0;
+const MAX_GRAPH_ENTITIES_PER_MEMORY: usize = 16;
+const MAX_GRAPH_SEEDS: usize = 8;
 
 /// Build a shorter keyword query from the longest 2 terms (len >= 2), so FTS AND-semantics
 /// can match when the full query has stopwords like "what does" that are not in the document.
@@ -107,6 +111,42 @@ fn significant_terms(query: &str) -> String {
     words.sort_by_key(|w: &&str| std::cmp::Reverse(w.len()));
     words.truncate(2);
     words.join(" ")
+}
+
+fn normalize_entity(name: &str) -> String {
+    name.split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_entity_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    token.len() >= 2
+        && first.is_uppercase()
+        && chars.any(|c| c.is_lowercase())
+        && !matches!(
+            token,
+            "The" | "This" | "That" | "They" | "Their" | "When" | "Where" | "What" | "Who"
+        )
+}
+
+fn extract_graph_entities(content: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    for raw in content.split_whitespace() {
+        let token = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        if is_entity_token(token) {
+            seen.insert(token.to_string());
+        }
+        if seen.len() >= MAX_GRAPH_ENTITIES_PER_MEMORY {
+            break;
+        }
+    }
+    seen.into_iter().collect()
 }
 
 /// Abstraction for memory persistence (add, get, search).
@@ -196,6 +236,29 @@ struct MemoryHistoryRecord {
     created_at: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct GraphEntityRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<RecordId>,
+    user_id: String,
+    name: String,
+    normalized: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MemoryEntityRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<RecordId>,
+    user_id: String,
+    memory_id: String,
+    entity_id: String,
+    entity_name: String,
+    entity_normalized: String,
+    created_at: String,
+}
+
 fn strip_backticks(s: &str) -> &str {
     s.trim().trim_matches('`')
 }
@@ -214,15 +277,20 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (na * nb)
 }
 
-fn record_id_to_string(rid: &Option<RecordId>, fallback: &str) -> String {
+fn record_id_to_string_for_table(rid: &Option<RecordId>, table: &str, fallback: &str) -> String {
     rid.as_ref()
         .map(|r| {
             let s = r.to_string();
             let s = strip_backticks(&s);
-            let s = s.strip_prefix("memories:").unwrap_or(s);
+            let prefix = format!("{table}:");
+            let s = s.strip_prefix(prefix.as_str()).unwrap_or(s);
             strip_backticks(s).to_string()
         })
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn record_id_to_string(rid: &Option<RecordId>, fallback: &str) -> String {
+    record_id_to_string_for_table(rid, "memories", fallback)
 }
 
 /// Fetch limit for each branch before RRF (take more then merge to top limit).
@@ -235,20 +303,22 @@ fn fetch_limit_for_rrf(limit: u32) -> u32 {
 fn rrf_merge(
     kw_list: Vec<(String, Memory)>,
     vec_list: Vec<(String, Memory)>,
+    graph_list: Vec<(String, Memory)>,
     limit: u32,
 ) -> Vec<(Memory, Option<f32>)> {
     let k = RRF_K as f32;
     let mut scores: HashMap<String, f32> = HashMap::new();
     let mut memories: HashMap<String, Memory> = HashMap::new();
-    for (rank_one_based, (id, mem)) in kw_list.into_iter().enumerate() {
-        let r = (rank_one_based + 1) as f32;
-        *scores.entry(id.clone()).or_default() += RRF_KEYWORD_WEIGHT / (k + r);
-        memories.insert(id, mem);
-    }
-    for (rank_one_based, (id, mem)) in vec_list.into_iter().enumerate() {
-        let r = (rank_one_based + 1) as f32;
-        *scores.entry(id.clone()).or_default() += 1.0 / (k + r);
-        memories.entry(id).or_insert(mem);
+    for (weight, list) in [
+        (RRF_KEYWORD_WEIGHT, kw_list),
+        (RRF_VECTOR_WEIGHT, vec_list),
+        (RRF_GRAPH_WEIGHT, graph_list),
+    ] {
+        for (rank_one_based, (id, mem)) in list.into_iter().enumerate() {
+            let r = (rank_one_based + 1) as f32;
+            *scores.entry(id.clone()).or_default() += weight / (k + r);
+            memories.entry(id).or_insert(mem);
+        }
     }
     let mut out: Vec<(String, f32)> = scores.into_iter().collect();
     out.sort_by(|a, b| {
@@ -416,6 +486,207 @@ impl SurrealMemoryStore {
             .collect())
     }
 
+    async fn clear_memory_graph_edges(&self, memory_id: &str) -> Result<(), Error> {
+        self.0
+            .query("DELETE memory_entities WHERE memory_id = $memory_id")
+            .bind(("memory_id", memory_id.to_string()))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb graph edge delete: {e}")))?;
+        Ok(())
+    }
+
+    async fn ensure_graph_entity(
+        &self,
+        user_id: &str,
+        name: &str,
+        normalized: &str,
+    ) -> Result<String, Error> {
+        let mut response = self
+            .0
+            .query(
+                "SELECT * FROM graph_entities \
+                 WHERE user_id = $user_id AND normalized = $normalized LIMIT 1",
+            )
+            .bind(("user_id", user_id.to_string()))
+            .bind(("normalized", normalized.to_string()))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb graph entity query: {e}")))?;
+        let rows: Vec<GraphEntityRecord> = response
+            .take(0)
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb graph entity take: {e}")))?;
+        if let Some(row) = rows.into_iter().next() {
+            return Ok(record_id_to_string_for_table(&row.id, "graph_entities", ""));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let record = GraphEntityRecord {
+            id: None,
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+            normalized: normalized.to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let created: Option<GraphEntityRecord> = self
+            .0
+            .create(("graph_entities", Uuid::new_v4().to_string()))
+            .content(record)
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb graph entity create: {e}")))?;
+        let created = created.ok_or_else(|| {
+            Error::Storage(anyhow::anyhow!(
+                "surrealdb graph entity create: no record returned"
+            ))
+        })?;
+        Ok(record_id_to_string_for_table(
+            &created.id,
+            "graph_entities",
+            "",
+        ))
+    }
+
+    async fn index_memory_graph(&self, memory: &Memory) -> Result<(), Error> {
+        self.clear_memory_graph_edges(&memory.id).await?;
+        let entities = extract_graph_entities(&memory.content);
+        let now = Utc::now().to_rfc3339();
+        for entity in entities {
+            let normalized = normalize_entity(&entity);
+            if normalized.is_empty() {
+                continue;
+            }
+            let entity_id = self
+                .ensure_graph_entity(&memory.user_id, &entity, &normalized)
+                .await?;
+            let edge = MemoryEntityRecord {
+                id: None,
+                user_id: memory.user_id.clone(),
+                memory_id: memory.id.clone(),
+                entity_id,
+                entity_name: entity,
+                entity_normalized: normalized,
+                created_at: now.clone(),
+            };
+            let _: Option<MemoryEntityRecord> = self
+                .0
+                .create(("memory_entities", Uuid::new_v4().to_string()))
+                .content(edge)
+                .await
+                .map_err(|e| {
+                    Error::Storage(anyhow::anyhow!("surrealdb memory entity create: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn entity_ids_for_memory(
+        &self,
+        user_id: &str,
+        memory_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        let mut response = self
+            .0
+            .query(
+                "SELECT * FROM memory_entities WHERE user_id = $user_id AND memory_id = $memory_id",
+            )
+            .bind(("user_id", user_id.to_string()))
+            .bind(("memory_id", memory_id.to_string()))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb memory entity query: {e}")))?;
+        let rows: Vec<MemoryEntityRecord> = response
+            .take(0)
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb memory entity take: {e}")))?;
+        Ok(rows.into_iter().map(|row| row.entity_id).collect())
+    }
+
+    async fn entity_ids_for_query(&self, user_id: &str, query: &str) -> Result<Vec<String>, Error> {
+        let mut ids = Vec::new();
+        for entity in extract_graph_entities(query) {
+            let normalized = normalize_entity(&entity);
+            if normalized.is_empty() {
+                continue;
+            }
+            let mut response = self
+                .0
+                .query(
+                    "SELECT * FROM graph_entities \
+                     WHERE user_id = $user_id AND normalized = $normalized LIMIT 1",
+                )
+                .bind(("user_id", user_id.to_string()))
+                .bind(("normalized", normalized))
+                .await
+                .map_err(|e| {
+                    Error::Storage(anyhow::anyhow!("surrealdb graph query entity: {e}"))
+                })?;
+            let rows: Vec<GraphEntityRecord> = response.take(0).map_err(|e| {
+                Error::Storage(anyhow::anyhow!("surrealdb graph query entity take: {e}"))
+            })?;
+            if let Some(row) = rows.into_iter().next() {
+                ids.push(record_id_to_string_for_table(&row.id, "graph_entities", ""));
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn search_graph_raw(
+        &self,
+        user_id: &str,
+        query: &str,
+        seed_ids: &[String],
+        fetch_limit: u32,
+        filters: &MemoryFilters,
+        now: &DateTime<Utc>,
+    ) -> Result<Vec<(String, Memory)>, Error> {
+        let mut entity_ids: BTreeSet<String> = self
+            .entity_ids_for_query(user_id, query)
+            .await?
+            .into_iter()
+            .collect();
+        for seed_id in seed_ids.iter().take(MAX_GRAPH_SEEDS) {
+            for entity_id in self.entity_ids_for_memory(user_id, seed_id).await? {
+                entity_ids.insert(entity_id);
+            }
+        }
+
+        let mut seen_memory_ids = HashSet::new();
+        let mut out = Vec::new();
+        for entity_id in entity_ids {
+            let mut response = self
+                .0
+                .query(
+                    "SELECT * FROM memory_entities \
+                     WHERE user_id = $user_id AND entity_id = $entity_id \
+                     ORDER BY created_at DESC LIMIT $limit",
+                )
+                .bind(("user_id", user_id.to_string()))
+                .bind(("entity_id", entity_id))
+                .bind(("limit", fetch_limit))
+                .await
+                .map_err(|e| {
+                    Error::Storage(anyhow::anyhow!("surrealdb graph candidate query: {e}"))
+                })?;
+            let rows: Vec<MemoryEntityRecord> = response.take(0).map_err(|e| {
+                Error::Storage(anyhow::anyhow!("surrealdb graph candidate take: {e}"))
+            })?;
+            for row in rows {
+                if out.len() >= fetch_limit as usize {
+                    break;
+                }
+                if !seen_memory_ids.insert(row.memory_id.clone()) {
+                    continue;
+                }
+                if let Some(mem) = self.get(&row.memory_id, user_id).await? {
+                    if is_valid_at(&mem, now) && filters.matches(&mem) {
+                        out.push((mem.id.clone(), mem));
+                    }
+                }
+            }
+            if out.len() >= fetch_limit as usize {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Keyword path: FULLTEXT on content with search::score, ordered by score desc.
     async fn search_keyword_raw(
         db: &Db,
@@ -533,6 +804,7 @@ impl MemoryStore for SurrealMemoryStore {
         })?;
         let out_id = record_id_to_string(&created.id, id);
         let created = Self::from_record(out_id, created);
+        self.index_memory_graph(&created).await?;
         self.record_history(&created.id, &created.user_id, "ADD", None, Some(&created))
             .await?;
         Ok(created)
@@ -609,6 +881,7 @@ impl MemoryStore for SurrealMemoryStore {
         })?;
         let out_id = record_id_to_string(&updated.id, id_trim);
         let updated = Self::from_record(out_id, updated);
+        self.index_memory_graph(&updated).await?;
         self.record_history(
             &updated.id,
             &updated.user_id,
@@ -643,6 +916,7 @@ impl MemoryStore for SurrealMemoryStore {
             None,
         )
         .await?;
+        self.clear_memory_graph_edges(&deleted.id).await?;
         let _: Option<MemoryRecord> = self
             .0
             .delete(("memories", id_trim))
@@ -712,6 +986,14 @@ impl MemoryStore for SurrealMemoryStore {
         let _: Vec<MemoryHistoryRecord> = response
             .take(0)
             .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb reset history take: {e}")))?;
+        self.0
+            .query("DELETE memory_entities")
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb reset graph edges: {e}")))?;
+        self.0
+            .query("DELETE graph_entities")
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb reset graph entities: {e}")))?;
         Ok(deleted)
     }
 
@@ -750,8 +1032,16 @@ impl MemoryStore for SurrealMemoryStore {
                     .await?;
                 }
             }
-            let merged = rrf_merge(kw_list, vec_list, limit);
             let now = Utc::now();
+            let seed_ids = kw_list
+                .iter()
+                .chain(vec_list.iter())
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            let graph_list = self
+                .search_graph_raw(&user_id, &query, &seed_ids, fetch_limit, filters, &now)
+                .await?;
+            let merged = rrf_merge(kw_list, vec_list, graph_list, limit);
             let filtered: Vec<_> = merged
                 .into_iter()
                 .filter(|(m, _)| is_valid_at(m, &now) && filters.matches(m))
@@ -782,9 +1072,13 @@ impl MemoryStore for SurrealMemoryStore {
             }
         }
         let now = Utc::now();
-        let list: Vec<_> = kw_list
+        let seed_ids = kw_list.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let graph_list = self
+            .search_graph_raw(user_id, query, &seed_ids, fetch_limit, filters, &now)
+            .await?;
+        let merged = rrf_merge(kw_list, Vec::new(), graph_list, limit);
+        let list: Vec<_> = merged
             .into_iter()
-            .map(|(_, mem)| (mem, None))
             .filter(|(m, _)| is_valid_at(m, &now) && filters.matches(m))
             .take(limit as usize)
             .collect();

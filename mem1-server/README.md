@@ -30,3 +30,15 @@ Local embedding uses **tract** (pure Rust ONNX inference); no native libs, so it
 - `GET /memories/:id/history` - return add/update/delete history for one memory.
 - `GET /users` - list user IDs with stored memories.
 - `POST /reset` - clear all memories and history.
+
+## Graph memory
+
+The storage layer now builds a lightweight entity graph on write:
+
+- `add` and `update` extract simple title-case entities from memory content.
+- Extracted entities are stored in `graph_entities`.
+- Memory-to-entity edges are stored in `memory_entities`.
+- `search` uses graph candidates as a third retrieval branch alongside keyword and vector retrieval, then fuses the branches with RRF.
+- Graph retrieval expands from entities found in the query and from entities attached to the first keyword/vector seed memories.
+
+This is intentionally local and deterministic. It gives the service a real graph-backed recall path without requiring an LLM extractor yet.
