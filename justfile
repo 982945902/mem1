@@ -10,3 +10,13 @@ check-rust:
 
 check-python:
     cd python && python -m pytest tests/ -v 2>/dev/null || true
+
+
+# Benchmark helpers
+benchmark-sample:
+	@echo "Starting mem1 benchmark sample (requires mem1-server running on 127.0.0.1:8080)"
+	cd evaluation && make sample
+
+benchmark-full:
+	@echo "Starting mem1 benchmark full pipeline (requires mem1-server running on 127.0.0.1:8080)"
+	cd evaluation && make full

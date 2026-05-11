@@ -28,6 +28,10 @@ pub struct SearchRequest {
     pub query: String,
     #[serde(default = "default_limit")]
     pub limit: u32,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub memory_type: Option<String>,
 }
 
 fn default_limit() -> u32 {
@@ -59,3 +63,12 @@ pub struct SearchResponse {
     pub formatted_context: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DeleteAllResponse {
+    pub deleted: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListResponse {
+    pub results: Vec<MemoryResult>,
+}

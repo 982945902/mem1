@@ -61,12 +61,24 @@ pub trait MemoryStore: Send + Sync {
     async fn add(&self, memory: &Memory) -> Result<Memory, Error>;
     async fn get(&self, id: &str, user_id: &str) -> Result<Option<Memory>, Error>;
     async fn delete(&self, id: &str, user_id: &str) -> Result<bool, Error>;
+    async fn delete_all_by_user(&self, user_id: &str) -> Result<u64, Error>;
+    async fn list_by_user(
+        &self,
+        user_id: &str,
+        limit: u32,
+        offset: u32,
+        scope: Option<String>,
+        memory_type: Option<String>,
+    ) -> Result<Vec<Memory>, Error>;
+
     async fn search(
         &self,
         user_id: &str,
         query: &str,
         query_embedding: Option<Vec<f32>>,
         limit: u32,
+        scope: Option<String>,
+        memory_type: Option<String>,
     ) -> Result<Vec<(Memory, Option<f32>)>, Error>;
 }
 
@@ -132,6 +144,29 @@ fn fetch_limit_for_rrf(limit: u32) -> u32 {
     (limit * 2).min(200)
 }
 
+
+fn metadata_matches(mem: &Memory, scope: Option<&str>, memory_type: Option<&str>) -> bool {
+    let scope_ok = match scope {
+        Some(s) => mem
+            .metadata
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(|x| x == s)
+            .unwrap_or(false),
+        None => true,
+    };
+    let type_ok = match memory_type {
+        Some(t) => mem
+            .metadata
+            .get("memory_type")
+            .and_then(|v| v.as_str())
+            .map(|x| x == t)
+            .unwrap_or(false),
+        None => true,
+    };
+    scope_ok && type_ok
+}
+
 /// RRF merge: combine keyword and vector ranked lists by Reciprocal Rank Fusion.
 /// Returns top `limit` unique memories sorted by RRF score desc, with score in second element.
 fn rrf_merge(
@@ -159,15 +194,19 @@ fn rrf_merge(
             return by_score;
         }
         // Tie-break: prefer newer memories (helps temporal recency)
-        let ca = memories.get(&a.0).map(|m| m.created_at.as_str()).unwrap_or("");
-        let cb = memories.get(&b.0).map(|m| m.created_at.as_str()).unwrap_or("");
+        let ca = memories
+            .get(&a.0)
+            .map(|m| m.created_at.as_str())
+            .unwrap_or("");
+        let cb = memories
+            .get(&b.0)
+            .map(|m| m.created_at.as_str())
+            .unwrap_or("");
         cb.cmp(ca)
     });
     out.into_iter()
         .take(limit as usize)
-        .filter_map(|(id, score)| {
-            memories.remove(&id).map(|mem| (mem, Some(score)))
-        })
+        .filter_map(|(id, score)| memories.remove(&id).map(|mem| (mem, Some(score))))
         .collect()
 }
 
@@ -288,6 +327,8 @@ impl SurrealMemoryStore {
         user_id: &str,
         mut items: Vec<(Memory, Option<f32>)>,
         limit: u32,
+        scope: Option<String>,
+        memory_type: Option<String>,
     ) -> Result<Vec<(Memory, Option<f32>)>, Error> {
         let cap = limit as usize;
         if items.len() >= cap {
@@ -326,14 +367,15 @@ impl MemoryStore for SurrealMemoryStore {
     async fn add(&self, memory: &Memory) -> Result<Memory, Error> {
         let id = Self::id_trim(&memory.id)?;
         let record = Self::to_record(memory);
-        let created: Option<MemoryRecord> = self
-            .0
-            .create(("memories", id))
-            .content(record)
-            .await
-            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb create: {e}")))?;
-        let created = created
-            .ok_or_else(|| Error::Storage(anyhow::anyhow!("surrealdb create: no record returned")))?;
+        let created: Option<MemoryRecord> =
+            self.0
+                .create(("memories", id))
+                .content(record)
+                .await
+                .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb create: {e}")))?;
+        let created = created.ok_or_else(|| {
+            Error::Storage(anyhow::anyhow!("surrealdb create: no record returned"))
+        })?;
         let out_id = record_id_to_string(&created.id, id);
         Ok(Self::from_record(out_id, created))
     }
@@ -376,12 +418,57 @@ impl MemoryStore for SurrealMemoryStore {
         Ok(true)
     }
 
+    async fn delete_all_by_user(&self, user_id: &str) -> Result<u64, Error> {
+        let sql = "DELETE memories WHERE user_id = $user_id RETURN BEFORE";
+        let mut response = self
+            .0
+            .query(sql)
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb delete all: {e}")))?;
+        let deleted_rows: Vec<MemoryRecord> = response
+            .take(0)
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb take: {e}")))?;
+        Ok(deleted_rows.len() as u64)
+    }
+
+    async fn list_by_user(
+        &self,
+        user_id: &str,
+        limit: u32,
+        offset: u32,
+        scope: Option<String>,
+        memory_type: Option<String>,
+    ) -> Result<Vec<Memory>, Error> {
+        let limit = limit.clamp(1, 200);
+        let sql = "SELECT * FROM memories WHERE user_id = $user_id ORDER BY created_at DESC LIMIT $limit START $offset";
+        let mut response = self
+            .0
+            .query(sql)
+            .bind(("user_id", user_id.to_string()))
+            .bind(("limit", limit))
+            .bind(("offset", offset))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb list by user: {e}")))?;
+        let rows: Vec<SearchRow> = response
+            .take(0)
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb take: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(Self::search_row_to_memory)
+            .map(|(_, mem)| mem)
+            .filter(|mem| metadata_matches(mem, scope.as_deref(), memory_type.as_deref()))
+            .collect())
+    }
+
     async fn search(
         &self,
         user_id: &str,
         query: &str,
         query_embedding: Option<Vec<f32>>,
         limit: u32,
+        scope: Option<String>,
+        memory_type: Option<String>,
     ) -> Result<Vec<(Memory, Option<f32>)>, Error> {
         let limit = limit.min(100);
 
@@ -393,8 +480,7 @@ impl MemoryStore for SurrealMemoryStore {
             let fetch_limit = fetch_limit_for_rrf(limit);
 
             let kw_fut = SurrealMemoryStore::search_keyword_raw(&db, &user_id, &query, fetch_limit);
-            let vec_fut =
-                SurrealMemoryStore::search_vector_raw(&db, &user_id, qvec, fetch_limit);
+            let vec_fut = SurrealMemoryStore::search_vector_raw(&db, &user_id, qvec, fetch_limit);
 
             let (kw_list, vec_list) = tokio::join!(kw_fut, vec_fut);
             let mut kw_list = kw_list?;
@@ -402,9 +488,13 @@ impl MemoryStore for SurrealMemoryStore {
             if kw_list.is_empty() {
                 let fallback = significant_terms(&query);
                 if !fallback.is_empty() {
-                    kw_list =
-                        SurrealMemoryStore::search_keyword_raw(&db, &user_id, &fallback, fetch_limit)
-                            .await?;
+                    kw_list = SurrealMemoryStore::search_keyword_raw(
+                        &db,
+                        &user_id,
+                        &fallback,
+                        fetch_limit,
+                    )
+                    .await?;
                 }
             }
             let merged = rrf_merge(kw_list, vec_list, limit);
@@ -412,6 +502,7 @@ impl MemoryStore for SurrealMemoryStore {
             let filtered: Vec<_> = merged
                 .into_iter()
                 .filter(|(m, _)| is_valid_at(m, &now))
+                .filter(|(m, _)| metadata_matches(m, scope.as_deref(), memory_type.as_deref()))
                 .take(limit as usize)
                 .collect();
             return self.expand_with_related(&user_id, filtered, limit).await;
@@ -427,9 +518,13 @@ impl MemoryStore for SurrealMemoryStore {
         if kw_list.is_empty() {
             let fallback = significant_terms(query);
             if fallback != query && !fallback.is_empty() {
-                kw_list =
-                    SurrealMemoryStore::search_keyword_raw(&self.0, user_id, &fallback, fetch_limit)
-                        .await?;
+                kw_list = SurrealMemoryStore::search_keyword_raw(
+                    &self.0,
+                    user_id,
+                    &fallback,
+                    fetch_limit,
+                )
+                .await?;
             }
         }
         let now = Utc::now();
@@ -437,6 +532,7 @@ impl MemoryStore for SurrealMemoryStore {
             .into_iter()
             .map(|(_, mem)| (mem, None))
             .filter(|(m, _)| is_valid_at(m, &now))
+            .filter(|(m, _)| metadata_matches(m, scope.as_deref(), memory_type.as_deref()))
             .take(limit as usize)
             .collect();
         self.expand_with_related(user_id, list, limit).await
