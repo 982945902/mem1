@@ -9,8 +9,10 @@ LOCOMO_URL ?= https://raw.githubusercontent.com/snap-research/locomo/main/data/l
 
 # Number of conversations to include in medium (from start of locomo10.json)
 MEDIUM_CONVS ?= 2
+SMOKE_CONVS ?= 1
+SMOKE_QAS ?= 8
 
-.PHONY: add search evals scores sample medium full download-locomo dataset/medium_locomo.json
+.PHONY: add search evals scores sample smoke medium full download-locomo dataset/smoke_locomo.json dataset/medium_locomo.json
 
 # Add memories from dataset to mem1-server
 add:
@@ -32,6 +34,16 @@ scores:
 sample:
 	$(MAKE) add DATA=dataset/sample_locomo.json
 	$(MAKE) search DATA=dataset/sample_locomo.json RESULTS_DIR=results
+	$(MAKE) evals
+	$(MAKE) scores
+
+# Smoke: first SMOKE_CONVS conversations, each limited to SMOKE_QAS questions.
+dataset/smoke_locomo.json: download-locomo
+	$(PYTHON) -m src.dataset_slice --source dataset/locomo10.json --output dataset/smoke_locomo.json --conversations $(SMOKE_CONVS) --qas-per-conversation $(SMOKE_QAS) --evidence-only
+
+smoke: dataset/smoke_locomo.json
+	$(MAKE) add DATA=dataset/smoke_locomo.json
+	$(MAKE) search DATA=dataset/smoke_locomo.json RESULTS_DIR=results
 	$(MAKE) evals
 	$(MAKE) scores
 

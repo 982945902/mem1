@@ -229,12 +229,19 @@ pub async fn update_memory(
         ));
     }
 
+    let content = req.content.map(|s| s.trim().to_string());
+    let embedding = if let Some(content) = &content {
+        state.embedder.embed_text(content).await?
+    } else {
+        None
+    };
     let updated = state
         .store
         .update(
             &id,
             &req.user_id,
-            req.content.map(|s| s.trim().to_string()),
+            content,
+            embedding,
             if req.metadata.is_empty() {
                 None
             } else {

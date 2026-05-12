@@ -100,6 +100,11 @@ const RRF_VECTOR_WEIGHT: f32 = 1.0;
 const RRF_GRAPH_WEIGHT: f32 = 1.0;
 const MAX_GRAPH_ENTITIES_PER_MEMORY: usize = 16;
 const MAX_GRAPH_SEEDS: usize = 8;
+const QUERY_ENTITY_STOPWORDS: &[&str] = &[
+    "about", "after", "again", "also", "and", "are", "before", "did", "does", "for", "from", "had",
+    "has", "have", "her", "his", "how", "into", "she", "that", "the", "their", "them", "they",
+    "this", "was", "what", "when", "where", "which", "who", "why", "with", "you",
+];
 
 /// Build a shorter keyword query from the longest 2 terms (len >= 2), so FTS AND-semantics
 /// can match when the full query has stopwords like "what does" that are not in the document.
@@ -121,26 +126,83 @@ fn normalize_entity(name: &str) -> String {
         .join(" ")
 }
 
+fn is_query_stopword(normalized: &str) -> bool {
+    QUERY_ENTITY_STOPWORDS.contains(&normalized)
+}
+
+fn is_acronym_token(token: &str) -> bool {
+    let mut upper_count = 0;
+    let mut has_alpha = false;
+    for c in token.chars() {
+        if c.is_ascii_alphabetic() {
+            has_alpha = true;
+            if c.is_ascii_uppercase() {
+                upper_count += 1;
+            } else {
+                return false;
+            }
+        } else if !c.is_ascii_digit() {
+            return false;
+        }
+    }
+    has_alpha && upper_count >= 2 && token.len() <= 12
+}
+
 fn is_entity_token(token: &str) -> bool {
     let mut chars = token.chars();
     let Some(first) = chars.next() else {
         return false;
     };
-    token.len() >= 2
-        && first.is_uppercase()
-        && chars.any(|c| c.is_lowercase())
-        && !matches!(
-            token,
-            "The" | "This" | "That" | "They" | "Their" | "When" | "Where" | "What" | "Who"
-        )
+    if token.len() < 2 || is_query_stopword(&token.to_ascii_lowercase()) {
+        return false;
+    }
+    (first.is_uppercase() && chars.any(|c| c.is_lowercase())) || is_acronym_token(token)
+}
+
+fn content_without_speaker_prefix(content: &str) -> &str {
+    let Some((prefix, rest)) = content.split_once(':') else {
+        return content;
+    };
+    let parts: Vec<&str> = prefix.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 3 || prefix.len() > 40 {
+        return content;
+    }
+    if parts.iter().all(|part| {
+        let token = part.trim_matches(|c: char| !c.is_alphanumeric());
+        is_entity_token(token)
+    }) {
+        rest
+    } else {
+        content
+    }
 }
 
 fn extract_graph_entities(content: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
-    for raw in content.split_whitespace() {
+    for raw in content_without_speaker_prefix(content).split_whitespace() {
         let token = raw.trim_matches(|c: char| !c.is_alphanumeric());
         if is_entity_token(token) {
             seen.insert(token.to_string());
+        }
+        if seen.len() >= MAX_GRAPH_ENTITIES_PER_MEMORY {
+            break;
+        }
+    }
+    seen.into_iter().collect()
+}
+
+fn query_entity_terms(query: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    for entity in extract_graph_entities(query) {
+        let normalized = normalize_entity(&entity);
+        if !normalized.is_empty() {
+            seen.insert(normalized);
+        }
+    }
+    for raw in query.split(|c: char| !c.is_alphanumeric()) {
+        let normalized = normalize_entity(raw);
+        if normalized.len() >= 3 && !is_query_stopword(&normalized) {
+            seen.insert(normalized);
         }
         if seen.len() >= MAX_GRAPH_ENTITIES_PER_MEMORY {
             break;
@@ -159,6 +221,7 @@ pub trait MemoryStore: Send + Sync {
         id: &str,
         user_id: &str,
         content: Option<String>,
+        embedding: Option<Vec<f32>>,
         metadata: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Option<Memory>, Error>;
     async fn delete(&self, id: &str, user_id: &str) -> Result<bool, Error>;
@@ -600,11 +663,7 @@ impl SurrealMemoryStore {
 
     async fn entity_ids_for_query(&self, user_id: &str, query: &str) -> Result<Vec<String>, Error> {
         let mut ids = Vec::new();
-        for entity in extract_graph_entities(query) {
-            let normalized = normalize_entity(&entity);
-            if normalized.is_empty() {
-                continue;
-            }
+        for normalized in query_entity_terms(query) {
             let mut response = self
                 .0
                 .query(
@@ -832,6 +891,7 @@ impl MemoryStore for SurrealMemoryStore {
         id: &str,
         user_id: &str,
         content: Option<String>,
+        embedding: Option<Vec<f32>>,
         metadata: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Option<Memory>, Error> {
         let id_trim = Self::id_trim(id)?;
@@ -863,7 +923,7 @@ impl MemoryStore for SurrealMemoryStore {
 
         if let Some(content) = content {
             record.content = content;
-            record.embedding = None;
+            record.embedding = embedding;
         }
         if let Some(metadata) = metadata {
             record.metadata.extend(metadata);

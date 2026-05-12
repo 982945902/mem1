@@ -23,6 +23,7 @@ from mem1 import Memory
 # Prompt: answer from two users' memories (no graph)
 ANSWER_PROMPT = """
 You are an intelligent memory assistant. Use only the provided memories to answer the question.
+Resolve relative dates such as yesterday, last week, last Saturday, last year, and next month using the memory Date shown in the context. Answer the inferred event date, month, or year; do not answer with the memory Date unless the event happened on that date.
 
 Memories for user {{speaker_1_user_id}}:
 {{speaker_1_memories}}
@@ -47,6 +48,23 @@ def memory_context_from_response(resp: dict) -> str:
 def load_data(file_path: str) -> list:
     with open(file_path, "r") as f:
         return json.load(f)
+
+
+def build_answer_prompt(
+    speaker_1_user_id: str,
+    speaker_2_user_id: str,
+    speaker_1_memories: str,
+    speaker_2_memories: str,
+    question: str,
+) -> str:
+    template = Template(ANSWER_PROMPT)
+    return template.render(
+        speaker_1_user_id=speaker_1_user_id,
+        speaker_2_user_id=speaker_2_user_id,
+        speaker_1_memories=speaker_1_memories,
+        speaker_2_memories=speaker_2_memories,
+        question=question,
+    )
 
 
 class Mem1Search:
@@ -92,8 +110,7 @@ class Mem1Search:
         speaker_1_id = speaker_a_user_id.split("_")[0]
         speaker_2_id = speaker_b_user_id.split("_")[0]
 
-        template = Template(ANSWER_PROMPT)
-        prompt = template.render(
+        prompt = build_answer_prompt(
             speaker_1_user_id=speaker_1_id,
             speaker_2_user_id=speaker_2_id,
             speaker_1_memories=context_a or "(none)",

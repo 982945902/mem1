@@ -25,6 +25,7 @@ mem1-server/mem1.db/
 # ---- Evaluation: generated outputs ----
 evaluation/results/
 evaluation/evaluation_metrics.json
+evaluation/dataset/smoke_locomo.json
 
 # ---- OS / editor ----
 .DS_Store
@@ -40,6 +41,7 @@ Thumbs.db
 .env.*
 
 # ---- Local / do not commit ----
+.context/
 specs/
 .specs/
 toolchain/

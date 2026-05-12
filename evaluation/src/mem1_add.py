@@ -35,17 +35,12 @@ def add_memories_for_speaker(
         content = msg.get("content", "").strip()
         if not content:
             continue
-        memory.add(content, user_id=user_id)
+        memory.add(content, user_id=user_id, **(msg.get("metadata") or {}))
 
 
-def process_conversation(memory: Memory, item: dict, idx: int) -> None:
-    """Process one conversation: add all messages for speaker_a and speaker_b."""
-    conversation = item["conversation"]
+def build_speaker_messages(conversation: dict) -> tuple[str, str, list[dict], list[dict]]:
     speaker_a = conversation["speaker_a"]
     speaker_b = conversation["speaker_b"]
-
-    speaker_a_user_id = f"{speaker_a}_{idx}"
-    speaker_b_user_id = f"{speaker_b}_{idx}"
 
     messages_a = []
     messages_b = []
@@ -55,15 +50,34 @@ def process_conversation(memory: Memory, item: dict, idx: int) -> None:
         chats = conversation.get(key, [])
         if not isinstance(chats, list):
             continue
+        metadata = {}
+        session_date = conversation.get(f"{key}_date_time")
+        if isinstance(session_date, str) and session_date.strip():
+            metadata["valid_at"] = session_date.strip()
         for chat in chats:
             speaker = chat.get("speaker", "")
             text = chat.get("text", "").strip()
             if not text:
                 continue
+            message = {
+                "role": "user",
+                "content": f"{speaker}: {text}",
+                "metadata": metadata.copy(),
+            }
             if speaker == speaker_a:
-                messages_a.append({"role": "user", "content": f"{speaker_a}: {text}"})
+                messages_a.append(message)
             elif speaker == speaker_b:
-                messages_b.append({"role": "user", "content": f"{speaker_b}: {text}"})
+                messages_b.append(message)
+    return speaker_a, speaker_b, messages_a, messages_b
+
+
+def process_conversation(memory: Memory, item: dict, idx: int) -> None:
+    """Process one conversation: add all messages for speaker_a and speaker_b."""
+    conversation = item["conversation"]
+    speaker_a, speaker_b, messages_a, messages_b = build_speaker_messages(conversation)
+
+    speaker_a_user_id = f"{speaker_a}_{idx}"
+    speaker_b_user_id = f"{speaker_b}_{idx}"
 
     add_memories_for_speaker(
         memory, speaker_a_user_id, messages_a, f"Adding memories for {speaker_a}_{idx}"
