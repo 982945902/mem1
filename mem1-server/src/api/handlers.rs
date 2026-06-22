@@ -23,7 +23,6 @@ fn build_formatted_context(memories: &[(Memory, Option<f32>)]) -> String {
         return String::new();
     }
     let mut facts = Vec::with_capacity(memories.len());
-    let mut entities = Vec::with_capacity(memories.len());
     for (m, _) in memories {
         let valid = m
             .metadata
@@ -35,18 +34,25 @@ fn build_formatted_context(memories: &[(Memory, Option<f32>)]) -> String {
             .get("invalid_at")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let speaker = m
+            .metadata
+            .get("source_role")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && *s != "message");
         let range = if invalid.is_empty() {
             format!("Date: {}", valid)
         } else {
             format!("Date range: {} - {}", valid, invalid)
         };
-        facts.push(format!("{} ({})", m.content.trim(), range));
-        entities.push(format!("{}: {}", m.id, m.content.trim()));
+        let fact = match speaker {
+            Some(role) => format!("{} — {} ({})", role, m.content.trim(), range),
+            None => format!("{} ({})", m.content.trim(), range),
+        };
+        facts.push(fact);
     }
     format!(
-        "FACTS and ENTITIES represent relevant context (Zep/Graphiti-style).\nformat: FACT (Date range: from - to)\n<FACTS>\n{}\n</FACTS>\nThese are the most relevant entities.\n<ENTITIES>\n{}\n</ENTITIES>",
+        "FACTS represent relevant context (Zep/Graphiti-style).\nformat: SPEAKER — FACT (Date range: from - to)\n<FACTS>\n{}\n</FACTS>",
         facts.join("\n"),
-        entities.join("\n")
     )
 }
 
