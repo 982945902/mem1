@@ -279,6 +279,13 @@ struct IdRow {
     id: Option<RecordId>,
 }
 
+#[derive(Deserialize)]
+struct EntityCountRow {
+    entity_normalized: String,
+    #[allow(dead_code)]
+    n: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemoryHistory {
     pub id: String,
@@ -666,6 +673,29 @@ impl SurrealMemoryStore {
         Ok(rows.into_iter().map(|row| row.entity_id).collect())
     }
 
+    /// Names that prefix many stored "Name: ..." lines are conversation speakers;
+    /// they recur in nearly every memory and carry little discriminating signal for
+    /// ranking, so the graph scorer treats them as low-information overlap terms.
+    async fn frequent_speaker_names(&self, user_id: &str) -> Result<Vec<String>, Error> {
+        let mut response = self
+            .0
+            .query(
+                "SELECT entity_normalized, count() AS n FROM memory_entities \
+                 WHERE user_id = $user_id GROUP BY entity_normalized ORDER BY n DESC LIMIT 6",
+            )
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb speaker names query: {e}")))?;
+        let rows: Vec<EntityCountRow> = response
+            .take(0)
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb speaker names take: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.entity_normalized)
+            .filter(|n| !n.is_empty())
+            .collect())
+    }
+
     async fn entity_ids_for_query(&self, user_id: &str, query: &str) -> Result<Vec<String>, Error> {
         let mut ids = Vec::new();
         for normalized in query_entity_terms(query) {
@@ -795,25 +825,48 @@ impl SurrealMemoryStore {
             }
         }
 
-        // Fetch candidates, score by (distinct query entities matched, query-term
-        // text overlap), and return the strongest first instead of newest-first.
+        // Speaker names (the user's own name from `{speaker}_{idx}`, plus any name
+        // that prefixes a stored "Name: ..." line) appear in almost every memory of
+        // a conversation, so matching them is nearly free signal. Treat them as
+        // low-information for the overlap score: content words like "grandma",
+        // "camped", "moved" should drive ranking, not the omnipresent speaker names.
+        let speaker_name = user_id
+            .rsplit_once('_')
+            .map(|(name, _)| name)
+            .unwrap_or(user_id)
+            .to_ascii_lowercase();
+        let low_info_terms: BTreeSet<String> = self
+            .frequent_speaker_names(user_id)
+            .await?
+            .into_iter()
+            .chain(std::iter::once(speaker_name))
+            .collect();
+
+        // Fetch candidates, score by (distinct query entities matched, content-word
+        // overlap), and return the strongest first instead of newest-first.
         let mut scored: Vec<(u32, u32, String, Memory)> = Vec::new();
         for memory_id in candidate_ids {
             if let Some(mem) = self.get(&memory_id, user_id).await? {
                 if is_valid_at(&mem, now) && filters.matches(&mem) {
                     let entity_score = query_entity_hits.get(&memory_id).copied().unwrap_or(0);
                     let lower = mem.content.to_lowercase();
-                    let mut overlap =
-                        query_terms.iter().filter(|t| lower.contains(*t)).count() as u32;
-                    overlap += intent_terms
+                    let content_terms = query_terms
                         .iter()
-                        .filter(|t| lower.contains(t.as_str()))
-                        .count() as u32;
+                        .map(|s| s.as_str())
+                        .chain(intent_terms.iter().map(|s| s.as_str()))
+                        .filter(|t| !low_info_terms.contains(*t));
+                    let mut seen_term: BTreeSet<&str> = BTreeSet::new();
+                    let mut overlap = 0u32;
+                    for t in content_terms {
+                        if seen_term.insert(t) && lower.contains(t) {
+                            overlap += 1;
+                        }
+                    }
                     // The graph branch should only contribute memories that actually
                     // connect to the query — either via a query-intent entity or via
-                    // a query term in the text. A candidate that matches neither is a
-                    // high-frequency-entity coattail (e.g. "Caroline: Wow!") and only
-                    // dilutes the fused ranking, so drop it here.
+                    // a content word in the text. A candidate that matches neither is
+                    // a high-frequency-entity coattail (e.g. "Caroline: Wow!") and
+                    // only dilutes the fused ranking, so drop it here.
                     if entity_score == 0 && overlap == 0 {
                         continue;
                     }
@@ -822,8 +875,8 @@ impl SurrealMemoryStore {
             }
         }
         scored.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then(b.1.cmp(&a.1))
+            b.1.cmp(&a.1)
+                .then(b.0.cmp(&a.0))
                 .then_with(|| b.3.created_at.cmp(&a.3.created_at))
         });
         Ok(scored
