@@ -232,7 +232,13 @@ pub async fn add_memory(
         return Err(Error::InvalidInput("content is required".to_string()));
     }
 
-    let mut facts = extract_facts(&sources);
+    // Prefer LLM extraction (normalized atomic facts) when configured; degrade to
+    // the deterministic rule-based splitter on any failure so writes never drop.
+    let mut facts = match &state.extractor {
+        Some(extractor) => extractor.extract(&sources).await,
+        None => None,
+    }
+    .unwrap_or_else(|| extract_facts(&sources));
     if facts.is_empty() {
         facts.push(fallback_fact(&sources));
     }
