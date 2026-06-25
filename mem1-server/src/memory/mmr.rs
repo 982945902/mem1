@@ -30,6 +30,17 @@ pub fn mmr_lambda_from_env() -> Option<f32> {
     }
 }
 
+/// How many top fused-ranking candidates to protect from MMR reordering.
+/// Defaults to half the requested limit; override with MEM1_MMR_PROTECT (absolute
+/// count). Protecting more favors precise single-hop/temporal answers; protecting
+/// less gives MMR more room to diversify for multi-hop set queries.
+pub fn mmr_protect(limit: usize) -> usize {
+    std::env::var("MEM1_MMR_PROTECT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(limit / 2)
+}
+
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
         return 0.0;

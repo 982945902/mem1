@@ -300,7 +300,7 @@ pub async fn search_memories(
             &embs,
             lambda,
             req.limit as usize,
-            (req.limit / 2) as usize,
+            crate::memory::mmr::mmr_protect(req.limit as usize),
         );
         let mut reordered: Vec<(Memory, Option<f32>)> = Vec::with_capacity(rows.len());
         let mut taken = vec![false; rows.len()];
