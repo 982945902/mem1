@@ -16,6 +16,43 @@ use axum::Json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Fuse multiple retrieval runs (one per rewritten sub-query) into a single
+/// ranked list via reciprocal-rank fusion: each memory accrues 1/(k+rank) from
+/// every run it appears in, deduped by memory id. Mirrors the in-store
+/// `rrf_merge` (memory.rs) but operates one level up, over whole runs that are
+/// each already a fused keyword+vector+graph result. A fact that several
+/// sub-queries surface rises; the pool covers more of a compound question.
+fn rrf_merge_runs(
+    runs: Vec<Vec<(Memory, Option<f32>)>>,
+    limit: usize,
+) -> Vec<(Memory, Option<f32>)> {
+    const K: f32 = 60.0;
+    let mut scores: HashMap<String, f32> = HashMap::new();
+    let mut memories: HashMap<String, Memory> = HashMap::new();
+    for run in runs {
+        for (rank_zero_based, (mem, _)) in run.into_iter().enumerate() {
+            let r = (rank_zero_based + 1) as f32;
+            *scores.entry(mem.id.clone()).or_default() += 1.0 / (K + r);
+            memories.entry(mem.id.clone()).or_insert(mem);
+        }
+    }
+    let mut out: Vec<(String, f32)> = scores.into_iter().collect();
+    out.sort_by(|a, b| {
+        let by_score = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+        if by_score != std::cmp::Ordering::Equal {
+            return by_score;
+        }
+        // Tie-break: newer first (consistent with in-store rrf_merge).
+        let ca = memories.get(&a.0).map(|m| m.created_at.as_str()).unwrap_or("");
+        let cb = memories.get(&b.0).map(|m| m.created_at.as_str()).unwrap_or("");
+        cb.cmp(ca)
+    });
+    out.into_iter()
+        .take(limit)
+        .filter_map(|(id, score)| memories.remove(&id).map(|mem| (mem, Some(score))))
+        .collect()
+}
+
 /// Build Zep/Graphiti-style context string: FACTS (with date range) + ENTITIES (id: content).
 /// Paper: "For each e_i, χ returns the fact and t_valid, t_invalid; for each n_i, name and summary."
 fn build_formatted_context(memories: &[(Memory, Option<f32>)]) -> String {
@@ -292,15 +329,46 @@ pub async fn search_memories(
     } else {
         req.limit
     };
+    // MMR diversity is always anchored on the ORIGINAL query's embedding, even
+    // when multi-query rewriting fans out the candidate pool.
     let query_vec_for_mmr = if mmr_lambda.is_some() {
         query_vec.clone()
     } else {
         None
     };
-    let mut rows = state
-        .store
-        .search(&user_id, &req.query, query_vec, fetch_limit, &filters)
-        .await?;
+
+    // Multi-query rewrite (LLM, env-gated): expand the query into focused
+    // sub-queries, retrieve each through the full RRF pipeline, and fuse the
+    // runs so facts scattered across a compound question all reach the pool.
+    // The rewriter always includes the original query and degrades to [query]
+    // on any failure, so the single-query path below is unchanged when off.
+    let queries: Vec<String> = match &state.query_rewriter {
+        Some(rw) => rw.rewrite(&req.query).await,
+        None => vec![req.query.clone()],
+    };
+    let mut rows = if queries.len() <= 1 {
+        state
+            .store
+            .search(&user_id, &req.query, query_vec, fetch_limit, &filters)
+            .await?
+    } else {
+        tracing::info!(n = queries.len(), "multi-query search");
+        let mut runs: Vec<Vec<(Memory, Option<f32>)>> = Vec::with_capacity(queries.len());
+        for (i, q) in queries.iter().enumerate() {
+            // Reuse the already-computed embedding for the original query (i==0).
+            let qvec = if i == 0 {
+                query_vec.clone()
+            } else {
+                state.embedder.embed_text(q).await?
+            };
+            let run = state
+                .store
+                .search(&user_id, q, qvec, fetch_limit, &filters)
+                .await?;
+            runs.push(run);
+        }
+        rrf_merge_runs(runs, fetch_limit as usize)
+    };
 
     // Embedded cross-encoder rerank (tract, in-process) takes precedence when
     // loaded: it scores each (query, passage) pair directly. Falls through to MMR
@@ -574,6 +642,7 @@ mod tests {
             embedder: Embedder::Off,
             extractor: None,
             reranker: None,
+            query_rewriter: None,
             #[cfg(feature = "local-embed")]
             cross_encoder: None,
         });

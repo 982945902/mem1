@@ -9,4 +9,5 @@ pub mod local_embed;
 pub mod local_rerank;
 pub mod model;
 pub mod mmr;
+pub mod query_rewrite;
 pub mod rerank;

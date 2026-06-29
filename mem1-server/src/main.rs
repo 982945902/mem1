@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
     if reranker.is_some() {
         tracing::info!("LLM listwise reranker enabled (RankGPT-style)");
     }
+    let query_rewriter = mem1_server::memory::query_rewrite::QueryRewriter::from_env();
+    if query_rewriter.is_some() {
+        tracing::info!("LLM multi-query rewriter enabled");
+    }
 
     #[cfg(feature = "local-embed")]
     let state = {
@@ -43,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
             embedder,
             extractor,
             reranker,
+            query_rewriter,
             cross_encoder,
         })
     };
@@ -52,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         embedder,
         extractor,
         reranker,
+        query_rewriter,
     });
 
     let app = Router::new()
