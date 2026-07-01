@@ -1,7 +1,7 @@
 //! Unit tests for storage layer (T011). Run with: cargo test --test storage_test
 
-use mem1_server::memory::model::Memory;
-use mem1_server::storage::{self, MemoryFilters, MemoryStore};
+use mem1_server::memory::model::{Memory, Session};
+use mem1_server::storage::{self, MemoryFilters, MemoryStore, SessionStore};
 use std::collections::HashMap;
 
 #[test]
@@ -301,6 +301,84 @@ async fn graph_search_does_not_expand_only_by_speaker_prefix() {
 
     assert!(ids.contains(&passport.id));
     assert!(!ids.contains(&hotel.id));
+
+    let _ = std::fs::remove_dir_all(db_path);
+}
+
+#[tokio::test]
+async fn session_create_get_list_and_user_isolation() {
+    let (db_path, store) = test_store("session-crud").await;
+
+    let s = Session::new(
+        "s1".to_string(),
+        "u1".to_string(),
+        Some("chat".to_string()),
+        HashMap::new(),
+    );
+    let created = store.create_session(&s).await.unwrap();
+    assert_eq!(created.id, "s1");
+    assert_eq!(created.name.as_deref(), Some("chat"));
+
+    // get scoped to owner
+    assert!(store.get_session("s1", "u1").await.unwrap().is_some());
+    assert!(store.get_session("s1", "other").await.unwrap().is_none());
+
+    // another user's session isn't listed
+    let s2 = Session::new("s2".to_string(), "u2".to_string(), None, HashMap::new());
+    store.create_session(&s2).await.unwrap();
+    let listed = store.list_sessions("u1").await.unwrap();
+    assert_eq!(
+        listed.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+        vec!["s1"]
+    );
+
+    let _ = std::fs::remove_dir_all(db_path);
+}
+
+#[tokio::test]
+async fn delete_session_keeps_or_cascades_memories() {
+    let (db_path, store) = test_store("session-cascade").await;
+
+    // A memory tagged with run_id=s1.
+    let mut md = HashMap::new();
+    md.insert("run_id".to_string(), serde_json::json!("s1"));
+    store
+        .add(&Memory::new(
+            "Alice likes tea".to_string(),
+            "u1".to_string(),
+            md,
+        ))
+        .await
+        .unwrap();
+    store
+        .create_session(&Session::new(
+            "s1".to_string(),
+            "u1".to_string(),
+            None,
+            HashMap::new(),
+        ))
+        .await
+        .unwrap();
+
+    // delete_session removes only the session row; the memory survives.
+    assert!(store.delete_session("s1", "u1").await.unwrap());
+    assert!(store.get_session("s1", "u1").await.unwrap().is_none());
+    let mut run_filter = MemoryFilters::default();
+    run_filter
+        .metadata
+        .insert("run_id".to_string(), "s1".to_string());
+    let kept = store.list_by_user("u1", 10, 0, &run_filter).await.unwrap();
+    assert_eq!(
+        kept.len(),
+        1,
+        "memory should survive non-cascade session delete"
+    );
+
+    // Cascade: caller deletes the session's memories via delete_all + run_id filter.
+    let deleted = store.delete_all("u1", &run_filter).await.unwrap();
+    assert_eq!(deleted, 1);
+    let after = store.list_by_user("u1", 10, 0, &run_filter).await.unwrap();
+    assert!(after.is_empty());
 
     let _ = std::fs::remove_dir_all(db_path);
 }

@@ -8,6 +8,8 @@ import type {
   HistoryResponse,
   MemoryResult,
   SearchResponse,
+  SessionResult,
+  SessionsResponse,
   UsersResponse,
 } from "./types.js";
 
@@ -181,6 +183,43 @@ export class Mem1Client {
 
   async reset(): Promise<DeleteAllResponse> {
     const r = await this.request("POST", "/reset");
+    if (r.status !== 200) return this.raise(r);
+    return (await r.json()) as DeleteAllResponse;
+  }
+
+  async createSession(
+    userId: string,
+    opts: { id?: string; name?: string; metadata?: Filters } = {},
+  ): Promise<SessionResult> {
+    const body: Record<string, unknown> = { user_id: userId, metadata: opts.metadata ?? {} };
+    if (opts.id !== undefined) body.id = opts.id;
+    if (opts.name !== undefined) body.name = opts.name;
+    const r = await this.request("POST", "/sessions", { body });
+    if (r.status !== 201) return this.raise(r);
+    return (await r.json()) as SessionResult;
+  }
+
+  async listSessions(userId: string): Promise<SessionsResponse> {
+    const r = await this.request("GET", "/sessions", { query: { user_id: userId } });
+    if (r.status !== 200) return this.raise(r);
+    return (await r.json()) as SessionsResponse;
+  }
+
+  async getSession(sessionId: string, userId: string): Promise<SessionResult | null> {
+    const r = await this.request("GET", `/sessions/${sessionId}`, { query: { user_id: userId } });
+    if (r.status === 404) return null;
+    if (r.status !== 200) return this.raise(r);
+    return (await r.json()) as SessionResult;
+  }
+
+  async deleteSession(
+    sessionId: string,
+    userId: string,
+    cascade = false,
+  ): Promise<DeleteAllResponse> {
+    const r = await this.request("DELETE", `/sessions/${sessionId}`, {
+      query: { user_id: userId, cascade },
+    });
     if (r.status !== 200) return this.raise(r);
     return (await r.json()) as DeleteAllResponse;
   }

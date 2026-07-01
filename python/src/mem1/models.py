@@ -62,3 +62,16 @@ class MemoryHistoryResult(BaseModel):
 
 class HistoryResponse(BaseModel):
     results: list[MemoryHistoryResult]
+
+
+class SessionResult(BaseModel):
+    id: str
+    user_id: str
+    name: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+
+
+class SessionsResponse(BaseModel):
+    results: list[SessionResult]

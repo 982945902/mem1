@@ -1,15 +1,15 @@
 use crate::api::dto::{
-    AddMemoryRequest, AddResponse, DeleteAllResponse, HistoryResponse, ListMemoriesQuery,
-    MemoryHistoryResult, MemoryResult, SearchRequest, SearchResponse, UpdateMemoryRequest,
-    UsersResponse,
+    AddMemoryRequest, AddResponse, CreateSessionRequest, DeleteAllResponse, DeleteSessionQuery,
+    HistoryResponse, ListMemoriesQuery, MemoryHistoryResult, MemoryResult, SearchRequest,
+    SearchResponse, SessionResult, SessionsResponse, UpdateMemoryRequest, UsersResponse,
 };
 use crate::app_state::AppState;
 use crate::error::Error;
 use crate::memory::extraction::{
     detect_language, extract_facts, ExtractedFact, SourceText, EXTRACTOR_VERSION,
 };
-use crate::memory::model::Memory;
-use crate::storage::{MemoryFilters, MemoryStore};
+use crate::memory::model::{Memory, Session};
+use crate::storage::{MemoryFilters, MemoryStore, SessionStore};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -682,6 +682,123 @@ pub async fn reset_memories(
 
 pub async fn reset_memories_svc(state: &AppState) -> Result<DeleteAllResponse, Error> {
     let deleted = state.store.reset().await?;
+    Ok(DeleteAllResponse { deleted })
+}
+
+fn session_to_result(s: Session) -> SessionResult {
+    SessionResult {
+        id: s.id,
+        user_id: s.user_id,
+        name: s.name,
+        metadata: s.metadata,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+    }
+}
+
+pub async fn create_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<(StatusCode, Json<SessionResult>), Error> {
+    let out = create_session_svc(&state, req).await?;
+    Ok((StatusCode::CREATED, Json(out)))
+}
+
+pub async fn create_session_svc(
+    state: &AppState,
+    req: CreateSessionRequest,
+) -> Result<SessionResult, Error> {
+    if req.user_id.trim().is_empty() {
+        return Err(Error::InvalidInput("user_id is required".to_string()));
+    }
+    let id = req
+        .id
+        .and_then(|s| {
+            let s = s.trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        })
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let session = Session::new(id, req.user_id, req.name, req.metadata);
+    let saved = state.store.create_session(&session).await?;
+    Ok(session_to_result(saved))
+}
+
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UserScopeQuery>,
+) -> Result<Json<SessionsResponse>, Error> {
+    Ok(Json(list_sessions_svc(&state, &q.user_id).await?))
+}
+
+pub async fn list_sessions_svc(state: &AppState, user_id: &str) -> Result<SessionsResponse, Error> {
+    if user_id.trim().is_empty() {
+        return Err(Error::InvalidInput("user_id is required".to_string()));
+    }
+    let rows = state.store.list_sessions(user_id).await?;
+    Ok(SessionsResponse {
+        results: rows.into_iter().map(session_to_result).collect(),
+    })
+}
+
+pub async fn get_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<UserScopeQuery>,
+) -> Result<Json<SessionResult>, Error> {
+    Ok(Json(get_session_svc(&state, &id, &q.user_id).await?))
+}
+
+pub async fn get_session_svc(
+    state: &AppState,
+    id: &str,
+    user_id: &str,
+) -> Result<SessionResult, Error> {
+    if user_id.trim().is_empty() {
+        return Err(Error::InvalidInput("user_id is required".to_string()));
+    }
+    let session = state.store.get_session(id, user_id).await?;
+    let session = session.ok_or(Error::NotFound)?;
+    Ok(session_to_result(session))
+}
+
+pub async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteSessionQuery>,
+) -> Result<Json<DeleteAllResponse>, Error> {
+    Ok(Json(
+        delete_session_svc(&state, &id, q.user_id, q.cascade).await?,
+    ))
+}
+
+/// Delete a session. When `cascade` is true, also delete the memories that
+/// belong to it (metadata run_id == session id). Returns the number of memories
+/// deleted (0 when not cascading). Errors NotFound if the session doesn't exist.
+pub async fn delete_session_svc(
+    state: &AppState,
+    id: &str,
+    user_id: String,
+    cascade: bool,
+) -> Result<DeleteAllResponse, Error> {
+    if user_id.trim().is_empty() {
+        return Err(Error::InvalidInput("user_id is required".to_string()));
+    }
+    let existed = state.store.delete_session(id, &user_id).await?;
+    if !existed {
+        return Err(Error::NotFound);
+    }
+    let mut deleted = 0u64;
+    if cascade {
+        let mut filters = MemoryFilters::default();
+        filters
+            .metadata
+            .insert("run_id".to_string(), id.to_string());
+        deleted = state.store.delete_all(&user_id, &filters).await?;
+    }
     Ok(DeleteAllResponse { deleted })
 }
 

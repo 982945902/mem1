@@ -3,7 +3,7 @@
 //! Optional temporal validity (metadata valid_at/invalid_at) inspired by Zep/Graphiti.
 
 use crate::error::Error;
-use crate::memory::model::Memory;
+use crate::memory::model::{Memory, Session};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1391,6 +1391,134 @@ impl MemoryStore for SurrealMemoryStore {
             .skip(offset as usize)
             .take(limit as usize)
             .collect())
+    }
+}
+
+/// Session lifecycle storage. Sessions are an optional layer grouping memories
+/// that share `metadata["run_id"]`; the session id IS the run_id.
+#[async_trait]
+pub trait SessionStore: Send + Sync {
+    async fn create_session(&self, session: &Session) -> Result<Session, Error>;
+    async fn get_session(&self, id: &str, user_id: &str) -> Result<Option<Session>, Error>;
+    async fn list_sessions(&self, user_id: &str) -> Result<Vec<Session>, Error>;
+    async fn delete_session(&self, id: &str, user_id: &str) -> Result<bool, Error>;
+}
+
+#[derive(Serialize, Deserialize)]
+struct SessionRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<RecordId>,
+    user_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    metadata: HashMap<String, serde_json::Value>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl SurrealMemoryStore {
+    fn session_to_record(s: &Session) -> SessionRecord {
+        SessionRecord {
+            id: None,
+            user_id: s.user_id.clone(),
+            name: s.name.clone(),
+            metadata: s.metadata.clone(),
+            created_at: s.created_at.clone(),
+            updated_at: s.updated_at.clone(),
+        }
+    }
+
+    fn session_from_record(id: String, r: SessionRecord) -> Session {
+        Session {
+            id,
+            user_id: r.user_id,
+            name: r.name,
+            metadata: r.metadata,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+#[async_trait]
+impl SessionStore for SurrealMemoryStore {
+    async fn create_session(&self, session: &Session) -> Result<Session, Error> {
+        let id = Self::id_trim(&session.id)?;
+        // Upsert: if a session row already exists (same user + id), replace it so
+        // re-creating an existing session is idempotent rather than an error.
+        let existing = self.get_session(id, &session.user_id).await?;
+        let record = Self::session_to_record(session);
+        let saved: Option<SessionRecord> = if existing.is_some() {
+            self.0
+                .update(("sessions", id))
+                .content(record)
+                .await
+                .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb session update: {e}")))?
+        } else {
+            self.0
+                .create(("sessions", id))
+                .content(record)
+                .await
+                .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb session create: {e}")))?
+        };
+        let saved = saved.ok_or_else(|| {
+            Error::Storage(anyhow::anyhow!(
+                "surrealdb session create: no record returned"
+            ))
+        })?;
+        let out_id = record_id_to_string_for_table(&saved.id, "sessions", id);
+        Ok(Self::session_from_record(out_id, saved))
+    }
+
+    async fn get_session(&self, id: &str, user_id: &str) -> Result<Option<Session>, Error> {
+        let id_trim = Self::id_trim(id)?;
+        let opt: Option<SessionRecord> = self
+            .0
+            .select(("sessions", id_trim))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb session select: {e}")))?;
+        let Some(r) = opt else {
+            return Ok(None);
+        };
+        if r.user_id != user_id {
+            return Ok(None);
+        }
+        let out_id = record_id_to_string_for_table(&r.id, "sessions", id_trim);
+        Ok(Some(Self::session_from_record(out_id, r)))
+    }
+
+    async fn list_sessions(&self, user_id: &str) -> Result<Vec<Session>, Error> {
+        let mut response = self
+            .0
+            .query("SELECT * FROM sessions WHERE user_id = $user_id ORDER BY created_at DESC")
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb list sessions: {e}")))?;
+        let rows: Vec<SessionRecord> = response
+            .take(0)
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb list sessions take: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let out_id = record_id_to_string_for_table(&r.id, "sessions", "");
+                Self::session_from_record(out_id, r)
+            })
+            .collect())
+    }
+
+    async fn delete_session(&self, id: &str, user_id: &str) -> Result<bool, Error> {
+        // Scope check: only delete if it belongs to this user.
+        if self.get_session(id, user_id).await?.is_none() {
+            return Ok(false);
+        }
+        let id_trim = Self::id_trim(id)?;
+        let _: Option<SessionRecord> = self
+            .0
+            .delete(("sessions", id_trim))
+            .await
+            .map_err(|e| Error::Storage(anyhow::anyhow!("surrealdb session delete: {e}")))?;
+        Ok(true)
     }
 }
 

@@ -9,6 +9,8 @@ import type {
   HistoryResponse,
   MemoryResult,
   SearchResponse,
+  SessionResult,
+  SessionsResponse,
   UsersResponse,
 } from "./types.js";
 
@@ -87,5 +89,31 @@ export class Memory {
 
   async reset(): Promise<DeleteAllResponse> {
     return this.client.reset();
+  }
+
+  async createSession(
+    userId: string = DEFAULT_USER,
+    opts: { id?: string; name?: string; metadata?: Filters } = {},
+  ): Promise<SessionResult> {
+    return this.client.createSession(userId, opts);
+  }
+
+  async listSessions(userId: string = DEFAULT_USER): Promise<SessionsResponse> {
+    return this.client.listSessions(userId);
+  }
+
+  async getSession(
+    sessionId: string,
+    userId: string = DEFAULT_USER,
+  ): Promise<SessionResult | null> {
+    return this.client.getSession(sessionId, userId);
+  }
+
+  async deleteSession(
+    sessionId: string,
+    userId: string = DEFAULT_USER,
+    cascade = false,
+  ): Promise<DeleteAllResponse> {
+    return this.client.deleteSession(sessionId, userId, cascade);
   }
 }

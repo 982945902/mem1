@@ -38,3 +38,36 @@ impl Memory {
         }
     }
 }
+
+/// A session: an optional organizational entity that groups memories sharing
+/// `metadata["run_id"]`. Scoped to a user. `id` is the run_id.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Session {
+    pub id: String,
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl Session {
+    pub fn new(
+        id: String,
+        user_id: String,
+        name: Option<String>,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> Self {
+        let now: String = chrono::Utc::now().to_rfc3339();
+        Self {
+            id,
+            user_id,
+            name,
+            metadata,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+}

@@ -122,6 +122,43 @@ pub struct HistoryResponse {
     pub results: Vec<MemoryHistoryResult>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateSessionRequest {
+    pub user_id: String,
+    /// Session id (= run_id). Generated if omitted.
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionResult {
+    pub id: String,
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionsResponse {
+    pub results: Vec<SessionResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteSessionQuery {
+    pub user_id: String,
+    /// When true, also delete the memories belonging to this session (run_id).
+    #[serde(default)]
+    pub cascade: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AddMemoryRequest, ListMemoriesQuery, SearchRequest};
