@@ -1,3 +1,5 @@
+import pytest
+
 from mem1.memory import Memory
 
 
@@ -10,10 +12,12 @@ class Dumpable:
 
 
 class FakeClient:
+    """Async fake matching the Mem1Client coroutine surface used by Memory."""
+
     def __init__(self):
         self.calls = []
 
-    def add(self, **kwargs):
+    async def add(self, **kwargs):
         self.calls.append(("add", kwargs))
         return Dumpable(
             {
@@ -36,7 +40,7 @@ class FakeClient:
             }
         )
 
-    def add_messages(self, **kwargs):
+    async def add_messages(self, **kwargs):
         self.calls.append(("add_messages", kwargs))
         return Dumpable(
             {
@@ -59,31 +63,31 @@ class FakeClient:
             }
         )
 
-    def search(self, **kwargs):
+    async def search(self, **kwargs):
         self.calls.append(("search", kwargs))
         return Dumpable({"results": [], "formatted_context": "ctx"})
 
-    def list(self, **kwargs):
+    async def list(self, **kwargs):
         self.calls.append(("list", kwargs))
         return Dumpable({"results": []})
 
-    def update(self, **kwargs):
+    async def update(self, **kwargs):
         self.calls.append(("update", kwargs))
         return Dumpable({"id": "m1", "content": "new"})
 
-    def delete_all(self, **kwargs):
+    async def delete_all(self, **kwargs):
         self.calls.append(("delete_all", kwargs))
         return Dumpable({"deleted": 2})
 
-    def history(self, **kwargs):
+    async def history(self, **kwargs):
         self.calls.append(("history", kwargs))
         return Dumpable({"results": []})
 
-    def users(self):
+    async def users(self):
         self.calls.append(("users", {}))
         return Dumpable({"users": ["u1"]})
 
-    def reset(self):
+    async def reset(self):
         self.calls.append(("reset", {}))
         return Dumpable({"deleted": 3})
 
@@ -95,10 +99,11 @@ def memory_with_fake_client():
     return memory, fake
 
 
-def test_add_content_returns_all_fanned_out_results():
+@pytest.mark.asyncio
+async def test_add_content_returns_all_fanned_out_results():
     memory, fake = memory_with_fake_client()
 
-    result = memory.add(
+    result = await memory.add(
         "Alice likes Rust. Alice lives in Paris.",
         user_id="u1",
         scope="profile",
@@ -120,14 +125,15 @@ def test_add_content_returns_all_fanned_out_results():
     ]
 
 
-def test_add_messages_forwards_message_payload_and_returns_fanned_out_results():
+@pytest.mark.asyncio
+async def test_add_messages_forwards_message_payload_and_returns_fanned_out_results():
     memory, fake = memory_with_fake_client()
     messages = [
         {"role": "user", "content": "I prefer tea."},
         {"role": "assistant", "content": "Noted."},
     ]
 
-    result = memory.add(messages, user_id="u1", agent_id="agent-a")
+    result = await memory.add(messages, user_id="u1", agent_id="agent-a")
 
     assert [item["content"] for item in result["results"]] == [
         "I prefer tea.",
@@ -150,10 +156,11 @@ def test_add_messages_forwards_message_payload_and_returns_fanned_out_results():
     ]
 
 
-def test_search_forwards_mem0_style_filters():
+@pytest.mark.asyncio
+async def test_search_forwards_mem0_style_filters():
     memory, fake = memory_with_fake_client()
 
-    result = memory.search(
+    result = await memory.search(
         "find preferences",
         user_id="u1",
         limit=5,
@@ -175,15 +182,16 @@ def test_search_forwards_mem0_style_filters():
     ]
 
 
-def test_memory_exposes_basic_service_read_management_methods():
+@pytest.mark.asyncio
+async def test_memory_exposes_basic_service_read_management_methods():
     memory, fake = memory_with_fake_client()
 
-    assert memory.get_all(user_id="u1", limit=20, scope="project") == {"results": []}
-    assert memory.update("m1", "new", user_id="u1") == {"id": "m1", "content": "new"}
-    assert memory.delete_all(user_id="u1", run_id="run-1") == {"deleted": 2}
-    assert memory.history("m1", user_id="u1") == {"results": []}
-    assert memory.users() == {"users": ["u1"]}
-    assert memory.reset() == {"deleted": 3}
+    assert await memory.get_all(user_id="u1", limit=20, scope="project") == {"results": []}
+    assert await memory.update("m1", "new", user_id="u1") == {"id": "m1", "content": "new"}
+    assert await memory.delete_all(user_id="u1", run_id="run-1") == {"deleted": 2}
+    assert await memory.history("m1", user_id="u1") == {"results": []}
+    assert await memory.users() == {"users": ["u1"]}
+    assert await memory.reset() == {"deleted": 3}
 
     assert fake.calls == [
         ("list", {"user_id": "u1", "limit": 20, "offset": 0, "filters": {"scope": "project"}}),

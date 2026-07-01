@@ -1,0 +1,27 @@
+{
+  "name": "mem1",
+  "version": "0.1.0",
+  "description": "Async TypeScript SDK for the mem1 AI memory service",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/982945902/mem1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/*.test.js",
+    "example": "node dist/examples/example.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  }
+}

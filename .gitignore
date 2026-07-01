@@ -60,3 +60,7 @@ toolchain_data/
 !.claude/commands/
 mem1-server/rerank_model/
 mem1-server/qwen3_embed_model/
+
+# ---- TypeScript SDK ----
+typescript/node_modules/
+typescript/dist/
