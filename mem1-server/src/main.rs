@@ -39,6 +39,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/memories/:id/history", get(handlers::memory_history))
         .route("/users", get(handlers::list_users))
         .route("/reset", post(handlers::reset_memories))
+        .route(
+            "/sessions",
+            get(handlers::list_sessions).post(handlers::create_session),
+        )
+        .route(
+            "/sessions/:id",
+            get(handlers::get_session).delete(handlers::delete_session),
+        )
         .with_state(state)
         .layer(axum::middleware::from_fn(middleware::trace_layer));
 

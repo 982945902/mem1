@@ -10,6 +10,8 @@ from mem1.models import (
     HistoryResponse,
     MemoryResult,
     SearchResponse,
+    SessionResult,
+    SessionsResponse,
     UsersResponse,
 )
 
@@ -171,6 +173,51 @@ class Mem1Client:
 
     async def reset(self) -> DeleteAllResponse:
         r = await self._http.post("/reset")
+        if r.status_code != 200:
+            self._raise(r)
+        return DeleteAllResponse.model_validate(r.json())
+
+    async def create_session(
+        self,
+        user_id: str,
+        session_id: Optional[str] = None,
+        name: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> SessionResult:
+        body: dict[str, Any] = {"user_id": user_id, "metadata": metadata or {}}
+        if session_id is not None:
+            body["id"] = session_id
+        if name is not None:
+            body["name"] = name
+        r = await self._http.post("/sessions", json=body)
+        if r.status_code != 201:
+            self._raise(r)
+        return SessionResult.model_validate(r.json())
+
+    async def list_sessions(self, user_id: str) -> SessionsResponse:
+        r = await self._http.get("/sessions", params={"user_id": user_id})
+        if r.status_code != 200:
+            self._raise(r)
+        return SessionsResponse.model_validate(r.json())
+
+    async def get_session(self, session_id: str, user_id: str) -> Optional[SessionResult]:
+        r = await self._http.get(f"/sessions/{session_id}", params={"user_id": user_id})
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            self._raise(r)
+        return SessionResult.model_validate(r.json())
+
+    async def delete_session(
+        self,
+        session_id: str,
+        user_id: str,
+        cascade: bool = False,
+    ) -> DeleteAllResponse:
+        r = await self._http.delete(
+            f"/sessions/{session_id}",
+            params={"user_id": user_id, "cascade": str(cascade).lower()},
+        )
         if r.status_code != 200:
             self._raise(r)
         return DeleteAllResponse.model_validate(r.json())

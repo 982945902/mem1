@@ -149,3 +149,36 @@ class Memory:
     async def reset(self) -> dict:
         resp = await self._client.reset()
         return resp.model_dump()
+
+    async def create_session(
+        self,
+        user_id: str = "default_user",
+        session_id: Optional[str] = None,
+        name: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict:
+        resp = await self._client.create_session(
+            user_id=user_id, session_id=session_id, name=name, metadata=metadata
+        )
+        return resp.model_dump()
+
+    async def list_sessions(self, user_id: str = "default_user") -> dict:
+        resp = await self._client.list_sessions(user_id=user_id)
+        return resp.model_dump()
+
+    async def get_session(
+        self, session_id: str, user_id: str = "default_user"
+    ) -> Optional[dict]:
+        r = await self._client.get_session(session_id=session_id, user_id=user_id)
+        return r.model_dump() if r else None
+
+    async def delete_session(
+        self,
+        session_id: str,
+        user_id: str = "default_user",
+        cascade: bool = False,
+    ) -> dict:
+        resp = await self._client.delete_session(
+            session_id=session_id, user_id=user_id, cascade=cascade
+        )
+        return resp.model_dump()

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mem1_server::api::dto::{
-    AddMemoryRequest, ListMemoriesQuery, SearchRequest, UpdateMemoryRequest,
+    AddMemoryRequest, CreateSessionRequest, ListMemoriesQuery, SearchRequest, UpdateMemoryRequest,
 };
 use mem1_server::api::handlers;
 use mem1_server::app_state::AppState;
@@ -108,6 +108,37 @@ pub struct DeleteArgs {
 pub struct UserScopeArgs {
     /// User/owner identifier.
     pub user_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateSessionArgs {
+    /// User/owner the session belongs to.
+    pub user_id: String,
+    /// Session id (= run_id). Generated if omitted.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Optional human-readable name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionRefArgs {
+    /// Session id.
+    pub id: String,
+    /// User/owner the session belongs to.
+    pub user_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteSessionArgs {
+    /// Session id.
+    pub id: String,
+    /// User/owner the session belongs to.
+    pub user_id: String,
+    /// When true, also delete the memories belonging to this session.
+    #[serde(default)]
+    pub cascade: bool,
 }
 
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
@@ -276,6 +307,60 @@ impl Mem1Mcp {
             run_id: None,
         };
         let out = handlers::delete_all_memories_svc(&self.state, q)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(
+        description = "Create a session (an optional group for memories sharing a run_id). Pass a stable id, or omit to auto-generate one."
+    )]
+    async fn create_session(
+        &self,
+        Parameters(args): Parameters<CreateSessionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = CreateSessionRequest {
+            user_id: args.user_id,
+            id: args.id,
+            name: args.name,
+            metadata: std::collections::HashMap::new(),
+        };
+        let out = handlers::create_session_svc(&self.state, req)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "List a user's sessions.")]
+    async fn list_sessions(
+        &self,
+        Parameters(args): Parameters<UserScopeArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let out = handlers::list_sessions_svc(&self.state, &args.user_id)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "Fetch a single session by id.")]
+    async fn get_session(
+        &self,
+        Parameters(args): Parameters<SessionRefArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let out = handlers::get_session_svc(&self.state, &args.id, &args.user_id)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(
+        description = "Delete a session. With cascade=true, also delete the memories in that session; otherwise the memories are kept."
+    )]
+    async fn delete_session(
+        &self,
+        Parameters(args): Parameters<DeleteSessionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let out = handlers::delete_session_svc(&self.state, &args.id, args.user_id, args.cascade)
             .await
             .map_err(to_mcp_err)?;
         ok_json(&out)

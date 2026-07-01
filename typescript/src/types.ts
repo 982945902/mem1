@@ -46,3 +46,16 @@ export interface ChatMessage {
 }
 
 export type Filters = Record<string, unknown>;
+
+export interface SessionResult {
+  id: string;
+  user_id: string;
+  name?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionsResponse {
+  results: SessionResult[];
+}
